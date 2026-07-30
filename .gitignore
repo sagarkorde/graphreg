@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+graphreg_system/checkpoints/
+graphreg_system/figures/
+graphreg_system/logs/
+datasets/
+.venv/
+venv/
+*.egg-info/
