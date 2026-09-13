@@ -1,86 +1,75 @@
 # GraphReg
 
-A checkpointed, resumable software pipeline for Bitcoin mainnet transaction graph analysis, wallet-pattern
-classification, and cross-dataset evaluation against the [Elliptic](https://www.elliptic.co/) benchmark.
-This is the reference implementation for *GraphReg: A Scalable System Implementation for Sparse Regularity
-Lemma-Based Bitcoin Graph Analysis and Wallet Profiling* (Korde and Shekokar).
+Code for GraphReg, a single-machine pipeline for Bitcoin transaction forensics. It audits a 5.88-million-transaction
+mainnet corpus, builds regularity-style graph partitions, and evaluates illicit-transaction detection on the
+[Elliptic](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set) benchmark.
 
-GraphReg is a single-machine pipeline (no distributed compute layer or service interface) organized into
-five resumable stages:
+## Repository layout
 
-1. **Streaming ingestion** (`data_ingestion.py`): memory-mapped, row-group-wise Parquet reading of the
-   mainnet ledger, avoiding full-file materialization.
-2. **Feature extraction** (`feature_extractor.py`): 23 topological, monetary, and protocol-level features
-   per transaction, plus a deterministic structural rule cascade that assigns mainnet pattern labels
-   (peer-to-peer, consolidation, distribution, batch payment, CoinJoin-like, other).
-3. **Sparse density partitioning** (`regularity_solver.py`): quantile-based clustering of transactions by
-   degree, with a k×k bipartite density matrix flagging irregular (high-density) cluster pairs. This is a
-   tractable heuristic *inspired by* Szemerédi's Sparse Regularity Lemma, not a formal implementation of it:
-   exhaustively verifying epsilon-regularity requires checking an exponential number of subset pairs, which
-   this solver does not do.
-4. **ML inference engine** (`ml_engine.py`): Logistic Regression, Random Forest, XGBoost, and an MLP for
-   six-class pattern classification, plus a dedicated binary XGBoost model for CoinJoin-like anomaly
-   detection.
-5. **Elliptic benchmark evaluation** (`elliptic_benchmark.py`): the same model family, retrained from
-   scratch on the independently-labeled [Elliptic dataset](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set)
-   (203,769 transactions, 46,564 labeled) under a strict temporal train/test split, with no parameter
-   transfer from the mainnet stage.
+| Folder | Contents |
+|---|---|
+| `icispd2026/` | Scripts behind the ICISPD 2026 manuscript *GraphReg: An Audited Evaluation of Regularity-Partition Graph Context for Bitcoin Transaction Forensics* (Korde and Shekokar). **Use this folder for all current results.** |
+| `graphreg_system/` | The earlier checkpointed pipeline, kept unchanged for traceability. Its reported results are superseded; see [below](#status-of-the-earlier-implementation). |
 
-`checkpoint.py` and `logger.py` are cross-cutting: every stage persists its output (as Parquet or pickled
-objects) and checks a JSON state file before recomputing, so the pipeline can be interrupted and resumed
-without repeating upstream work. The logger records structured, timestamped throughput/latency/memory
-metrics for each stage.
+## ICISPD 2026 experiments (`icispd2026/`)
 
-## Important caveat on results
+| Script | Purpose |
+|---|---|
+| `mainnet_scaling.py audit` | Full-corpus audit: overlapping pattern flags, corrected class distribution, unreliable derived columns |
+| `mainnet_scaling.py leakage` | Feature-group ablation showing that mainnet pattern labels are recovered from the fields the labelling rules use |
+| `mainnet_scaling.py scale` | Single-machine scaling benchmark: column-projected reading, vectorized features, address tokenization, transaction–address incidence partition, XGBoost |
+| `mainnet_scaling.py naive` | Baselines: full 53-column load into pandas and the original row-wise label cascade |
+| `elliptic_partition_context.py` | k-way partition of the Elliptic graph, spectral certificate for sparse ε-regularity, partition-context features, five-seed temporal evaluation (LR, RF, XGBoost, MLP, GCN) |
+| `make_figures.py` | Figures and summary tables |
 
-Mainnet pattern labels are a **deterministic function of the same structural fields** (input/output counts,
-script types) supplied to the classifiers. Near-ceiling mainnet F1 scores therefore demonstrate that the
-classifiers correctly recover this known labeling rule, not that they generalize to unseen transaction
-structure. The Elliptic benchmark, whose labels come from an independent forensic investigation, is the
-primary evidence of real-world classification capability.
+Requirements and run order are in [`icispd2026/README.md`](icispd2026/README.md).
 
-Similarly, the ingestion engine's reported throughput is **streaming row-group I/O throughput**, not
-full end-to-end pipeline throughput. Feature extraction, partitioning, and model training are separately
-timed, slower stages.
+Headline results from the manuscript:
 
-## Usage
+- The full corpus is tokenized, partitioned, and classified end to end in 94 s with 7.0 GB of peak memory on one laptop.
+- Six-class mainnet pattern scores of 1.000 fall to a macro-F1 of 0.715 once count and size features are removed, so they
+  measure recovery of the labelling rules rather than forensic generalization.
+- On Elliptic (test time steps 35–49, five seeds), a random forest reaches an illicit F1 of 0.824, XGBoost a PR-AUC of 0.803,
+  and a GCN reproduction an F1 of 0.517. Partition-context features add about one F1 point to local-feature models and
+  nothing measurable once neighbourhood aggregates are included.
+- No cluster pair is certified ε-regular on either the Elliptic graph or the mainnet incidence graph.
+
+## Status of the earlier implementation
+
+An audit carried out for the ICISPD 2026 manuscript found errors in results produced with `graphreg_system/`. Those
+numbers should not be cited:
+
+- `regularity_solver.py` never counts edges between clusters, so its density matrix carries no pairwise information.
+- The ingestion throughput divides the full corpus size by the time needed to read 10 of the 51 row groups.
+- The class distribution plotted in `ml_engine.py` is hard-coded, counts overlapping pattern flags more than once, and
+  treats OP_RETURN (an attribute) as a class.
+- The corpus's stored address counts and `has_taproot` flag are unreliable; `icispd2026/` recomputes them from raw fields.
+
+To run the earlier pipeline for comparison:
 
 ```bash
 pip install -r requirements.txt
-```
-
-Download the primary mainnet transaction corpus (5,884,387 Bitcoin transactions, Parquet format) from
-[IEEE DataPort](https://dx.doi.org/10.21227/bxmt-mn56) (DOI: 10.21227/bxmt-mn56) and place it at
-`datasets/custom/Dataset.parquet`. Place the [Elliptic](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set)
-CSVs under `datasets/elliptic/`. Then run:
-
-```bash
 python -m graphreg_system.main
 ```
 
-Each stage's outputs and metrics are checkpointed under `graphreg_system/checkpoints/`; re-running the
-command resumes from the last completed stage rather than recomputing everything.
+## Data
 
-## Requirements
+- **Mainnet corpus** (5,884,387 transactions, Parquet): [IEEE DataPort](https://dx.doi.org/10.21227/bxmt-mn56),
+  doi:10.21227/bxmt-mn56. Place it at `datasets/custom/Dataset.parquet`.
+- **Elliptic**: [Kaggle](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set). Place the three CSV files under
+  `datasets/elliptic/`.
 
-- Python 3.10+
-- See `requirements.txt`. XGBoost will use CUDA histogram construction automatically when a CUDA-capable
-  GPU is available (`torch.cuda.is_available()`); it falls back to CPU otherwise.
+Datasets, experiment outputs, and manuscript sources are not included in this repository.
 
 ## Citation
 
-If this code or the accompanying dataset is used, please cite:
+If you use this code or the dataset, please cite:
 
 ```
-S. Korde and N. Shekokar, "GraphReg: A Scalable System Implementation for Sparse Regularity
-Lemma-Based Bitcoin Graph Analysis and Wallet Profiling," IEEE conference submission, 2026.
+S. Korde and N. Shekokar, "GraphReg: An Audited Evaluation of Regularity-Partition Graph Context for
+Bitcoin Transaction Forensics," ICISPD 2026 submission, 2026.
 
 S. Korde, N. Shekokar, and I. Siddavatam, "Bitcoin Blockchain Transaction Dataset for Wallet
 Address Profiling and Behavioral Analysis (Parquet Format)," IEEE DataPort, 2026,
 doi: 10.21227/bxmt-mn56.
 ```
-
-## Repository scope
-
-This repository contains the GraphReg system implementation only. The manuscript-generation tooling used
-to produce the accompanying paper is intentionally excluded.
